@@ -164,7 +164,7 @@ function Install-OfficeLast([string]$ProgramsFolder) {
     $officeExe = $console[0].FullName
     Push-Location -LiteralPath $console[0].DirectoryName
     try {
-        & $officeExe deploy /add HomeBusiness2024Retail_th-th /edition 64 /display true /enableupdates true /dlfirst
+        & $officeExe deploy /add HomeBusiness2024Retail_th-th /edition 64 /display true /enableupdates true /dlfirst | Out-Host
         $officeExit = $LASTEXITCODE
         if ($officeExit -ne 0) {
             Write-Warning ("Office deployment returned exit code " + $officeExit + ". Check Office Tool Plus logs.")
