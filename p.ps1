@@ -97,33 +97,81 @@ function Install-FontsFirst([string]$ProgramsFolder) {
     Say ("Fonts completed. New font files: " + $added + ". A reboot may be needed for some applications to detect them.")
 }
 
-function Install-SelectedApp([string]$ProgramsFolder, [string]$Label, [string]$FilenameRegex, [string]$Arguments, [bool]$Interactive = $false) {
+
+# Query standard uninstall entries instead of Win32_Product (which can initiate repairs).
+function Test-AppInstalled([string]$Label) {
+    $patterns = @{
+        'Adobe Acrobat Reader' = '^Adobe (?:Acrobat )?Reader(?:\s|$|[\(])|^Adobe Acrobat Reader'
+        'AIMP'                = '^AIMP(?:\s|$)'
+        'UltraViewer'         = '^UltraViewer(?:\s|$)'
+        'VLC media player'    = '^VLC media player(?:\s|$)'
+        'WinRAR (English)'    = '^WinRAR(?:\s|$)'
+        'Google Chrome'      = '^Google Chrome(?:\s|$)'
+        'Zoom'               = '^Zoom(?:\s|$|[\(])|^Zoom Workplace'
+        'LINE PC (Thai)'     = '^LINE(?:\s|$|[\(])'
+    }
+    $pattern = $patterns[$Label]
+    if (-not $pattern) { return $false }
+
+    $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    $entries = @(Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -and $_.DisplayName -match $pattern })
+    if ($entries.Count -gt 0) { return $true }
+
+    # Fallback for apps without an Uninstall registry entry.
+    $pf86 = [Environment]::GetFolderPath('ProgramFilesX86')
+    $possibleFiles = switch ($Label) {
+        'AIMP'             { @("$env:ProgramFiles\AIMP\AIMP.exe", "$pf86\AIMP\AIMP.exe") }
+        'UltraViewer'      { @("$env:ProgramFiles\UltraViewer\UltraViewer_Desktop.exe", "$pf86\UltraViewer\UltraViewer_Desktop.exe") }
+        'VLC media player' { @("$env:ProgramFiles\VideoLAN\VLC\vlc.exe", "$pf86\VideoLAN\VLC\vlc.exe") }
+        'WinRAR (English)' { @("$env:ProgramFiles\WinRAR\WinRAR.exe", "$pf86\WinRAR\WinRAR.exe") }
+        'Google Chrome'   { @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "$pf86\Google\Chrome\Application\chrome.exe", "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe") }
+        'Zoom'            { @("$env:APPDATA\Zoom\bin\Zoom.exe", "$env:LOCALAPPDATA\Zoom\bin\Zoom.exe", "$env:ProgramFiles\Zoom\bin\Zoom.exe") }
+        'LINE PC (Thai)'  { @("$env:LOCALAPPDATA\LINE\bin\LineLauncher.exe", "$env:LOCALAPPDATA\LINE\bin\LINE.exe", "$env:LOCALAPPDATA\Programs\LINE\LINE.exe") }
+        default           { @() }
+    }
+    foreach ($file in @($possibleFiles)) {
+        if ($file -and (Test-Path -LiteralPath $file -PathType Leaf)) { return $true }
+    }
+    return $false
+}
+
+function Test-Office2024Installed {
+    $config = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+    if (-not $config -or -not $config.ProductReleaseIds) { return $false }
+    return (([string]$config.ProductReleaseIds -split ',') -contains 'HomeBusiness2024Retail')
+}
+
+function Install-SelectedApp([string]$ProgramsFolder, [string]$Label, [string]$FilenameRegex, [string]$Arguments) {
+    if (Test-AppInstalled -Label $Label) {
+        Say ("ALREADY INSTALLED - SKIP: " + $Label)
+        return
+    }
     $found = @(Get-ChildItem -LiteralPath $ProgramsFolder -File -ErrorAction Stop |
         Where-Object { $_.Name -match $FilenameRegex } |
         Sort-Object Name -Descending)
-
     if ($found.Count -eq 0) {
-        Write-Warning ("SKIPPED: " + $Label + " - setup file not found on this USB.")
+        Write-Warning ("SKIPPED: " + $Label + " - installer not found on USB.")
         return
     }
-
     $file = $found[0]
     Say ("Installing: " + $Label + " [" + $file.Name + "]")
-
     try {
-        if ($Interactive) {
-            Write-Host 'LINE: choose Thai (ภาษาไทย) in the installer, then complete the installation.' -ForegroundColor Yellow
-            $process = Start-Process -FilePath $file.FullName -PassThru -Wait -ErrorAction Stop
+        $process = Start-Process -FilePath $file.FullName -ArgumentList $Arguments -PassThru -Wait -ErrorAction Stop
+        if ($process.ExitCode -notin @(0, 3010, 1641)) {
+            Write-Warning ("Installer reported exit code " + $process.ExitCode + " for " + $Label)
+            return
+        }
+        if (Test-AppInstalled -Label $Label) {
+            Say ("VERIFIED INSTALLED: " + $Label)
         }
         else {
-            $process = Start-Process -FilePath $file.FullName -ArgumentList $Arguments -PassThru -Wait -ErrorAction Stop
-        }
-
-        if ($process.ExitCode -in @(0, 3010, 1641)) {
-            Say ("Installer finished: " + $Label + " (exit code " + $process.ExitCode + ").")
-        }
-        else {
-            Write-Warning ("Installer returned code " + $process.ExitCode + ": " + $Label + ". Check installation manually.")
+            Write-Warning ("Installer exited successfully, but installation is not yet verified: " + $Label)
         }
     }
     catch {
@@ -131,8 +179,76 @@ function Install-SelectedApp([string]$ProgramsFolder, [string]$Label, [string]$F
     }
 }
 
+function Install-Line([string]$ProgramsFolder) {
+    $label = 'LINE PC (Thai)'
+    if (Test-AppInstalled $label) {
+        Say 'ALREADY INSTALLED - SKIP: LINE'
+        Write-Host 'To change the LINE language: Settings > Basic > Language > Thai.' -ForegroundColor Yellow
+        return
+    }
+
+    $setups = @(Get-ChildItem -LiteralPath $ProgramsFolder -File -ErrorAction Stop |
+        Where-Object { $_.Name -match '^LineInst.*\.exe$' } |
+        Sort-Object Name -Descending)
+    if ($setups.Count -eq 0) {
+        Write-Warning 'SKIPPED LINE: LineInst.exe was not found in Programs.'
+        return
+    }
+
+    # WinGet can accept installer terms and install silently without UI clicks.
+    # If unavailable, fall back to the existing local USB installer.
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($winget) {
+        Say 'Installing LINE using WinGet (silent; internet required)...'
+        try {
+            & $winget.Source install --id LINE.LINE --exact --source winget --silent --no-upgrade --accept-package-agreements --accept-source-agreements | Out-Host
+            $wingetExit = $LASTEXITCODE
+            if ($wingetExit -eq 0 -and (Test-AppInstalled $label)) {
+                Say 'VERIFIED INSTALLED: LINE'
+                Write-Host 'LINE language: Settings > Basic > Language > Thai; restart LINE if requested.' -ForegroundColor Yellow
+                return
+            }
+            Write-Warning ("WinGet installation not verified (exit code " + $wingetExit + "); using USB instead.")
+        }
+        catch { Write-Warning ("WinGet failed: " + $_.Exception.Message) }
+    }
+
+    Say ("Opening LINE installer from USB: " + $setups[0].Name)
+    Write-Host 'Tick the LINE terms checkbox and click Install.' -ForegroundColor Yellow
+    Write-Host 'Press S in this PowerShell window to SKIP LINE and continue to Office.' -ForegroundColor Yellow
+    Write-Host 'Then set LINE: Settings > Basic > Language > Thai (ภาษาไทย).' -ForegroundColor Yellow
+    try { $null = Start-Process -FilePath $setups[0].FullName -PassThru -ErrorAction Stop }
+    catch { Write-Warning ("Could not start LINE installer: " + $_.Exception.Message); return }
+
+    # Never wait forever for LINE's installer/launcher process tree to close.
+    $deadline = (Get-Date).AddMinutes(6)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-AppInstalled $label) {
+            Say 'VERIFIED INSTALLED: LINE'
+            Write-Host 'Set LINE language to Thai in LINE Settings if needed.' -ForegroundColor Yellow
+            return
+        }
+        try {
+            if ($Host.UI.RawUI.KeyAvailable) {
+                $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+                if ($key.Character -eq 's' -or $key.Character -eq 'S') {
+                    Write-Warning 'LINE skipped by user. Continuing to Office.'
+                    return
+                }
+            }
+        }
+        catch { }
+        Start-Sleep -Seconds 3
+    }
+    Write-Warning 'LINE not verified within 6 minutes. Continuing to Office.'
+}
 
 function Install-OfficeLast([string]$ProgramsFolder) {
+    if (Test-Office2024Installed) {
+        Say 'ALREADY INSTALLED - SKIP: Office Home and Business 2024'
+        return $true
+    }
+
     # Office Tool Plus is a portable application. Locate its console executable
     # inside the USB's Programs\Office Tool directory without running arbitrary EXEs.
     $toolFolder = Join-Path $ProgramsFolder 'Office Tool'
@@ -223,7 +339,7 @@ try {
     Install-SelectedApp $programs 'WinRAR (English)' '^winrar-x64-[0-9]+\.exe$' '-s1'
     Install-SelectedApp $programs 'Google Chrome' '^ChromeSetup.*\.exe$' '/silent /install'
     Install-SelectedApp $programs 'Zoom' '^ZoomInstaller.*\.exe$' '/silent'
-    Install-SelectedApp $programs 'LINE PC (Thai)' '^LineInst.*\.exe$' '' $true
+    Install-Line -ProgramsFolder $programs
 
     $officeInstalled = Install-OfficeLast -ProgramsFolder $programs
     if ($officeInstalled) {
