@@ -144,14 +144,14 @@ function Install-OfficeLast([string]$ProgramsFolder) {
 
     if (-not (Test-Path -LiteralPath $toolFolder -PathType Container)) {
         Write-Warning "SKIPPED Office: USB Programs\Office Tool folder was not found."
-        return
+        return $false
     }
 
     $console = @(Get-ChildItem -LiteralPath $toolFolder -File -Filter 'Office Tool Plus.Console.exe' -Recurse -ErrorAction SilentlyContinue |
         Select-Object -First 1)
     if ($console.Count -eq 0) {
         Write-Warning 'SKIPPED Office: Office Tool Plus.Console.exe was not found. Extract Office Tool Plus (with runtime) inside Office Tool first.'
-        return
+        return $false
     }
 
     # Preserve any existing Office installation: do not uninstall, activate, or alter licenses.
@@ -168,17 +168,43 @@ function Install-OfficeLast([string]$ProgramsFolder) {
         $officeExit = $LASTEXITCODE
         if ($officeExit -ne 0) {
             Write-Warning ("Office deployment returned exit code " + $officeExit + ". Check Office Tool Plus logs.")
+            return $false
         }
         else {
             Say 'Office Tool Plus deployment command completed. Verify Office apps and activation.'
+            return $true
         }
     }
     catch {
         Write-Warning ("Office deployment failed: " + $_.Exception.Message)
+        return $false
     }
     finally {
         Pop-Location
     }
+}
+
+function Open-Local-MAS-Menu([string]$ProgramsFolder) {
+    # Final optional hand-off: opens the exact USB script and leaves
+    # all activation choices to the person at the keyboard.
+    $masPath = Join-Path $ProgramsFolder 'MAS_AIO.ps1'
+    if (-not (Test-Path -LiteralPath $masPath -PathType Leaf)) {
+        Write-Warning 'MAS_AIO.ps1 not found in the Programs folder. No activation utility launched.'
+        return
+    }
+
+    Write-Host 'The optional MAS_AIO.ps1 script will run with administrator privileges.' -ForegroundColor Yellow
+    Write-Host 'Review the script before accepting. This step does not choose any activation menu option.' -ForegroundColor Yellow
+    $answer = Read-Host 'Open MAS_AIO.ps1 now? (Y/N)'
+    if ($answer -notin @('Y','y')) {
+        Say 'Skipped the optional MAS menu.'
+        return
+    }
+
+    # Keep the menu in its own console so the user can operate it manually.
+    # No commands or activation choices are sent to the opened script.
+    $quotedPath = '"' + $masPath + '"'
+    Start-Process -FilePath 'powershell.exe' -ArgumentList ('-NoLogo -NoProfile -NoExit -File ' + $quotedPath) -Wait -ErrorAction Stop
 }
 
 try {
@@ -199,7 +225,13 @@ try {
     Install-SelectedApp $programs 'Zoom' '^ZoomInstaller.*\.exe$' '/silent'
     Install-SelectedApp $programs 'LINE PC (Thai)' '^LineInst.*\.exe$' '' $true
 
-    Install-OfficeLast -ProgramsFolder $programs
+    $officeInstalled = Install-OfficeLast -ProgramsFolder $programs
+    if ($officeInstalled) {
+        Open-Local-MAS-Menu -ProgramsFolder $programs
+    }
+    else {
+        Write-Warning 'Office did not finish successfully; skipping the optional final step.'
+    }
 
     Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
 }
