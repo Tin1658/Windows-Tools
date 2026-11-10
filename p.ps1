@@ -321,14 +321,25 @@ function Open-Local-MAS-Menu([string]$ProgramsFolder) {
     try {
         $process = Start-Process -FilePath 'powershell.exe' -ArgumentList ('-NoLogo -NoProfile -File ' + $quotedPath) -PassThru -ErrorAction Stop
 
-        # Allow up to 15 seconds for the new console to initialize.
+        # Silently watch for a named window; do not click, type, or show a notification.
+        # The script-scoped values can be read later by other code if needed.
+        $script:OhookWindowFound = $false
+        $script:OhookWindowInfo = $null
         $watch = [Diagnostics.Stopwatch]::StartNew()
-        while ($watch.Elapsed.TotalSeconds -lt 15) {
-            Start-Sleep -Milliseconds 300
-            $process.Refresh()
-            if ($process.HasExited -or $process.MainWindowHandle -ne [IntPtr]::Zero) {
+        while ($watch.Elapsed.TotalSeconds -lt 30) {
+            $match = Get-Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.MainWindowTitle -like '*Ohook Activation*' } |
+                Select-Object -First 1
+            if ($null -ne $match) {
+                $script:OhookWindowFound = $true
+                $script:OhookWindowInfo = [PSCustomObject]@{
+                    ProcessId = $match.Id
+                    Title     = $match.MainWindowTitle
+                    Handle    = $match.MainWindowHandle
+                }
                 break
             }
+            Start-Sleep -Milliseconds 400
         }
 
         if (-not $process.HasExited) {
