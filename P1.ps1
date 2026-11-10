@@ -22,6 +22,13 @@ $script:Problems = New-Object 'System.Collections.Generic.List[string]'
 $script:Completed = New-Object 'System.Collections.Generic.List[string]'
 $script:Manual = New-Object 'System.Collections.Generic.List[string]'
 $script:RestartRequired = $false
+$script:TranscriptRunning = $false
+$script:LogPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'P1-Setup.log'
+try {
+    Start-Transcript -Path $script:LogPath -Append -ErrorAction Stop | Out-Null
+    $script:TranscriptRunning = $true
+}
+catch { Write-Warning ('P1 could not start the log file: ' + $_.Exception.Message) }
 
 function Step([string]$Name, [scriptblock]$Action) {
     Write-Host ''
@@ -300,4 +307,10 @@ try {
 }
 catch {
     Write-Host ('P1 STOPPED: ' + $_.Exception.Message) -ForegroundColor Red
+}
+finally {
+    if ($script:TranscriptRunning) {
+        try { Stop-Transcript -ErrorAction Stop | Out-Null } catch {}
+        Write-Host ('P1 log file: ' + $script:LogPath)
+    }
 }
