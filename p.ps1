@@ -34,14 +34,33 @@ function Find-UsbPrograms {
         throw 'No USB flash drive was found. Connect your USB flash drive first.'
     }
 
+    # Scan every folder level on the USB drive, not just its root.
+    # Prefer a Programs folder that contains the required Thai font directory.
+    $candidatePaths = New-Object 'System.Collections.Generic.List[string]'
     foreach ($root in $usbRoots) {
-        $folder = Join-Path $root 'Programs'
-        if (Test-Path -LiteralPath $folder -PathType Container) {
-            Say ("USB Programs folder found: " + $folder)
-            return $folder
+        Say ("Searching all folders on USB: " + $root)
+        $direct = Join-Path $root 'Programs'
+        if (Test-Path -LiteralPath $direct -PathType Container) {
+            $candidatePaths.Add($direct)
+        }
+        $matches = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'Programs' -Recurse -Force -ErrorAction SilentlyContinue)
+        foreach ($match in $matches) {
+            $candidatePaths.Add($match.FullName)
         }
     }
-    throw 'A USB drive was detected, but it has no Programs folder in its root. Nothing was installed.'
+
+    foreach ($candidate in @($candidatePaths | Select-Object -Unique)) {
+        $fontFolder = Join-Path $candidate 'Font พร้อมใช้'
+        if (Test-Path -LiteralPath $fontFolder -PathType Container) {
+            Say ("USB Programs folder found: " + $candidate)
+            return $candidate
+        }
+    }
+
+    if ($candidatePaths.Count -gt 0) {
+        throw 'Found Programs on a USB drive, but no Programs folder contains the required Font folder. Nothing was installed.'
+    }
+    throw 'No Programs folder was found anywhere on a USB flash drive. Nothing was installed.'
 }
 
 function Install-FontsFirst([string]$ProgramsFolder) {
@@ -126,7 +145,30 @@ try {
     Install-SelectedApp $programs 'UltraViewer' '^UltraViewer_setup_[0-9.]+_en\.exe$' '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
     Install-SelectedApp $programs 'VLC media player' '^vlc-[0-9.]+-win64\.exe$' '/S'
     Install-SelectedApp $programs 'WinRAR (English)' '^winrar-x64-[0-9]+\.exe$' '-s1'
-    Install-SelectedApp $programs 'LINE PC (Thai)' '^LineInst.*\.exe$' '' $true
+    Install-SelectedApp $programs 'Google Chrome' '^ChromeSetup.*\.exe
+
+    Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
+}
+catch {
+    Write-Host ("STOPPED: " + $_.Exception.Message) -ForegroundColor Red
+}
+ '/silent /install'
+    Install-SelectedApp $programs 'Zoom' '^ZoomInstaller.*\.exe
+
+    Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
+}
+catch {
+    Write-Host ("STOPPED: " + $_.Exception.Message) -ForegroundColor Red
+}
+ '/silent'
+    Install-SelectedApp $programs 'LINE PC (Thai)' '^LineInst.*\.exe
+
+    Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
+}
+catch {
+    Write-Host ("STOPPED: " + $_.Exception.Message) -ForegroundColor Red
+}
+ '' $true
 
     Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
 }
