@@ -342,13 +342,11 @@ function Open-Local-MAS-Menu([string]$ProgramsFolder) {
             Start-Sleep -Milliseconds 400
         }
 
+        # Wait for the launched script to finish; detection is intentionally silent.
+        $process.Refresh()
         if (-not $process.HasExited) {
-            Say 'External window launched. Operate its menus manually.'
-            Write-Host 'Continuing after the external PowerShell process closes.' -ForegroundColor Yellow
             $process.WaitForExit()
         }
-
-        Say ('External process ended with exit code: ' + $process.ExitCode)
     }
     catch {
         Write-Warning ('Could not open or wait for the external script: ' + $_.Exception.Message)
