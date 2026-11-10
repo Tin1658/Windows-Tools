@@ -300,6 +300,61 @@ function Install-OfficeLast([string]$ProgramsFolder) {
     }
 }
 
+# Best-effort, read-only Windows UI Automation snapshot.
+# Returns text exposed by the window's accessible controls; some terminals
+# and console windows do not expose their screen buffer through UI Automation.
+function Get-WindowVisibleText([IntPtr]$WindowHandle) {
+    if ($WindowHandle -eq [IntPtr]::Zero) { return $null }
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($WindowHandle)
+        if ($null -eq $root) { return $null }
+
+        $nodes = New-Object 'System.Collections.Generic.List[System.Windows.Automation.AutomationElement]'
+        $nodes.Add($root)
+        $children = $root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        for ($i = 0; $i -lt $children.Count; $i++) {
+            $nodes.Add($children.Item($i))
+        }
+
+        $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+        $parts = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($node in $nodes) {
+            try {
+                $value = $null
+                $pattern = $null
+
+                if ($node.TryGetCurrentPattern(
+                    [System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern
+                )) {
+                    $value = $pattern.DocumentRange.GetText(8000)
+                }
+                elseif ($node.TryGetCurrentPattern(
+                    [System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern
+                )) {
+                    $value = $pattern.Current.Value
+                }
+                elseif ($node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text) {
+                    $value = $node.Current.Name
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    $value = $value.Trim()
+                    if ($seen.Add($value)) { $parts.Add($value) }
+                }
+            }
+            catch { } # Inaccessible controls are skipped.
+        }
+        if ($parts.Count -eq 0) { return $null }
+        return ($parts -join [Environment]::NewLine)
+    }
+    catch { return $null }
+}
+
 function Open-Local-MAS-Menu([string]$ProgramsFolder) {
     # Optional hand-off: launch a script from USB in a separate PowerShell window.
     # Wait for its window and eventual exit. Menu choices/key presses stay manual.
@@ -325,6 +380,8 @@ function Open-Local-MAS-Menu([string]$ProgramsFolder) {
         # The script-scoped values can be read later by other code if needed.
         $script:OhookWindowFound = $false
         $script:OhookWindowInfo = $null
+        $script:OhookScreenText = $null
+        $script:OhookScreenReadable = $false
         $watch = [Diagnostics.Stopwatch]::StartNew()
         while ($watch.Elapsed.TotalSeconds -lt 30) {
             $match = Get-Process -ErrorAction SilentlyContinue |
@@ -337,7 +394,13 @@ function Open-Local-MAS-Menu([string]$ProgramsFolder) {
                     Title     = $match.MainWindowTitle
                     Handle    = $match.MainWindowHandle
                 }
-                break
+                # Read only. No keystrokes or menu selection are sent.
+                $snapshot = Get-WindowVisibleText -WindowHandle $match.MainWindowHandle
+                if (-not [string]::IsNullOrWhiteSpace($snapshot)) {
+                    $script:OhookScreenText = $snapshot
+                    $script:OhookScreenReadable = $true
+                    break
+                }
             }
             Start-Sleep -Milliseconds 400
         }
