@@ -139,36 +139,15 @@ try {
     $programs = Find-UsbPrograms
     Install-FontsFirst -ProgramsFolder $programs
 
-    # Only the highlighted installers in the supplied photos, in this specific order.
+    # Only approved installers from the Programs folder.
     Install-SelectedApp $programs 'Adobe Acrobat Reader' '^AcroRdrDC.*_en_US\.exe$' '/sAll /rs /msi EULA_ACCEPT=YES'
     Install-SelectedApp $programs 'AIMP' '^aimp_[0-9.]+_w64\.exe$' '/AUTO /SILENT'
     Install-SelectedApp $programs 'UltraViewer' '^UltraViewer_setup_[0-9.]+_en\.exe$' '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
     Install-SelectedApp $programs 'VLC media player' '^vlc-[0-9.]+-win64\.exe$' '/S'
     Install-SelectedApp $programs 'WinRAR (English)' '^winrar-x64-[0-9]+\.exe$' '-s1'
-    Install-SelectedApp $programs 'Google Chrome' '^ChromeSetup.*\.exe
-
-    Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
-}
-catch {
-    Write-Host ("STOPPED: " + $_.Exception.Message) -ForegroundColor Red
-}
- '/silent /install'
-    Install-SelectedApp $programs 'Zoom' '^ZoomInstaller.*\.exe
-
-    Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
-}
-catch {
-    Write-Host ("STOPPED: " + $_.Exception.Message) -ForegroundColor Red
-}
- '/silent'
-    Install-SelectedApp $programs 'LINE PC (Thai)' '^LineInst.*\.exe
-
-    Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
-}
-catch {
-    Write-Host ("STOPPED: " + $_.Exception.Message) -ForegroundColor Red
-}
- '' $true
+    Install-SelectedApp $programs 'Google Chrome' '^ChromeSetup.*\.exe$' '/silent /install'
+    Install-SelectedApp $programs 'Zoom' '^ZoomInstaller.*\.exe$' '/silent'
+    Install-SelectedApp $programs 'LINE PC (Thai)' '^LineInst.*\.exe$' '' $true
 
     Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
 }
