@@ -131,6 +131,56 @@ function Install-SelectedApp([string]$ProgramsFolder, [string]$Label, [string]$F
     }
 }
 
+
+function Install-OfficeLast([string]$ProgramsFolder) {
+    # Office Tool Plus is a portable application. Locate its console executable
+    # inside the USB's Programs\Office Tool directory without running arbitrary EXEs.
+    $toolFolder = Join-Path $ProgramsFolder 'Office Tool'
+    if (-not (Test-Path -LiteralPath $toolFolder -PathType Container)) {
+        $folders = @(Get-ChildItem -LiteralPath $ProgramsFolder -Directory -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'Office Tool' })
+        if ($folders.Count -gt 0) { $toolFolder = $folders[0].FullName }
+    }
+
+    if (-not (Test-Path -LiteralPath $toolFolder -PathType Container)) {
+        Write-Warning "SKIPPED Office: USB Programs\Office Tool folder was not found."
+        return
+    }
+
+    $console = @(Get-ChildItem -LiteralPath $toolFolder -File -Filter 'Office Tool Plus.Console.exe' -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1)
+    if ($console.Count -eq 0) {
+        Write-Warning 'SKIPPED Office: Office Tool Plus.Console.exe was not found. Extract Office Tool Plus (with runtime) inside Office Tool first.'
+        return
+    }
+
+    # Preserve any existing Office installation: do not uninstall, activate, or alter licenses.
+    # Home & Business 2024 Retail includes the selected six apps in the screenshot:
+    # Word, Excel, PowerPoint, Outlook (classic), OneNote, and OneDrive.
+    # Language: Thai (th-th); architecture: 64-bit; Retail update channel: default.
+    Say 'FINAL STEP: Deploy Office Home and Business 2024 (64-bit, Thai).'
+    Write-Host 'Office Tool Plus will download Office first and then install it. Internet may be required.' -ForegroundColor Yellow
+    Write-Host 'A valid Office Home and Business 2024 license is required to activate Office.' -ForegroundColor Yellow
+    $officeExe = $console[0].FullName
+    Push-Location -LiteralPath $console[0].DirectoryName
+    try {
+        & $officeExe deploy /add HomeBusiness2024Retail_th-th /edition 64 /display true /enableupdates true /dlfirst
+        $officeExit = $LASTEXITCODE
+        if ($officeExit -ne 0) {
+            Write-Warning ("Office deployment returned exit code " + $officeExit + ". Check Office Tool Plus logs.")
+        }
+        else {
+            Say 'Office Tool Plus deployment command completed. Verify Office apps and activation.'
+        }
+    }
+    catch {
+        Write-Warning ("Office deployment failed: " + $_.Exception.Message)
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 try {
     $admin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -148,6 +198,8 @@ try {
     Install-SelectedApp $programs 'Google Chrome' '^ChromeSetup.*\.exe$' '/silent /install'
     Install-SelectedApp $programs 'Zoom' '^ZoomInstaller.*\.exe$' '/silent'
     Install-SelectedApp $programs 'LINE PC (Thai)' '^LineInst.*\.exe$' '' $true
+
+    Install-OfficeLast -ProgramsFolder $programs
 
     Say 'Completed all selected setup steps. Check any warnings above, then restart Windows if needed.'
 }
