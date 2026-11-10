@@ -239,16 +239,23 @@ function Check-FileAssociations {
     $png = Get-CurrentUserAssociation '.png'
     Write-Host ('Current .rar default ProgID: ' + $(if($rar){$rar}else{'unknown'}))
     Write-Host ('Current .png default ProgID: ' + $(if($png){$png}else{'unknown'}))
-    if ($rar -notlike 'WinRAR*') {
-        $script:Manual.Add('Set .rar to WinRAR in Settings > Apps > Default apps.')
-    }
-    if ($png -notmatch 'Acro|Adobe') {
-        $script:Manual.Add('Set .png to the requested Adobe app, if that app supports PNG.')
-    }
-    if ($script:Manual.Count -gt 0) {
-        Write-Host 'Some tasks may need manual action; opening Windows Default apps.'
+    $rarDone = $rar -like 'WinRAR*'
+    $pngDone = $png -match 'Acro|Adobe'
+    if (-not ($rarDone -and $pngDone)) {
+        Write-Host 'Windows 11 protects current-user defaults; selecting an app requires your confirmation.'
+        Write-Host 'Find .rar and choose WinRAR. For .png, choose Adobe only if it is listed as supported.'
         Start-Process 'ms-settings:defaultapps'
-        Write-Host 'In Default apps search .rar and select WinRAR; search .png and choose Adobe if available.'
+        [void](Read-Host 'After adjusting defaults, press Enter to verify and continue')
+        $rar = Get-CurrentUserAssociation '.rar'
+        $png = Get-CurrentUserAssociation '.png'
+        $rarDone = $rar -like 'WinRAR*'
+        $pngDone = $png -match 'Acro|Adobe'
+    }
+    if (-not $rarDone) {
+        $script:Manual.Add('Current .rar default is not WinRAR. Complete it in Default apps.')
+    }
+    if (-not $pngDone) {
+        $script:Manual.Add('Current .png default is not Adobe. Acrobat Reader may not register as a PNG viewer.')
     }
 }
 
@@ -281,8 +288,8 @@ try {
     if ($NoRestart) {
         Write-Host 'NoRestart specified. Restart yourself after completing any manual steps.'
     }
-    elseif ($script:Problems.Count -gt 0) {
-        Write-Warning 'There are failed steps. Automatic restart was cancelled so you can review and retry.'
+    elseif ($script:Problems.Count -gt 0 -or $script:Manual.Count -gt 0) {
+        Write-Warning 'Failed or unfinished/manual steps remain. Automatic restart cancelled; finish them and run P1 again.'
     }
     else {
         Write-Warning 'A single Windows restart is scheduled in 60 seconds. Save your work.'
