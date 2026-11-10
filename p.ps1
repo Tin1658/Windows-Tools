@@ -301,26 +301,47 @@ function Install-OfficeLast([string]$ProgramsFolder) {
 }
 
 function Open-Local-MAS-Menu([string]$ProgramsFolder) {
-    # Final optional hand-off: opens the exact USB script and leaves
-    # all activation choices to the person at the keyboard.
+    # Optional hand-off: launch a script from USB in a separate PowerShell window.
+    # Wait for its window and eventual exit. Menu choices/key presses stay manual.
     $masPath = Join-Path $ProgramsFolder 'MAS_AIO.ps1'
     if (-not (Test-Path -LiteralPath $masPath -PathType Leaf)) {
-        Write-Warning 'MAS_AIO.ps1 not found in the Programs folder. No activation utility launched.'
+        Write-Warning 'MAS_AIO.ps1 not found in the Programs folder. No tool launched.'
         return
     }
 
-    Write-Host 'The optional MAS_AIO.ps1 script will run with administrator privileges.' -ForegroundColor Yellow
-    Write-Host 'Review the script before accepting. This step does not choose any activation menu option.' -ForegroundColor Yellow
-    $answer = Read-Host 'Open MAS_AIO.ps1 now? (Y/N)'
+    Write-Host ('Selected script: ' + $masPath) -ForegroundColor Yellow
+    Write-Warning 'Review the local script before executing it as Administrator.'
+    $answer = Read-Host 'Open the script in a separate PowerShell window? (Y/N)'
     if ($answer -notin @('Y','y')) {
-        Say 'Skipped the optional MAS menu.'
+        Say 'Optional tool skipped.'
         return
     }
 
-    # Keep the menu in its own console so the user can operate it manually.
-    # No commands or activation choices are sent to the opened script.
     $quotedPath = '"' + $masPath + '"'
-    Start-Process -FilePath 'powershell.exe' -ArgumentList ('-NoLogo -NoProfile -NoExit -File ' + $quotedPath) -Wait -ErrorAction Stop
+    try {
+        $process = Start-Process -FilePath 'powershell.exe' -ArgumentList ('-NoLogo -NoProfile -File ' + $quotedPath) -PassThru -ErrorAction Stop
+
+        # Allow up to 15 seconds for the new console to initialize.
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        while ($watch.Elapsed.TotalSeconds -lt 15) {
+            Start-Sleep -Milliseconds 300
+            $process.Refresh()
+            if ($process.HasExited -or $process.MainWindowHandle -ne [IntPtr]::Zero) {
+                break
+            }
+        }
+
+        if (-not $process.HasExited) {
+            Say 'External window launched. Operate its menus manually.'
+            Write-Host 'Continuing after the external PowerShell process closes.' -ForegroundColor Yellow
+            $process.WaitForExit()
+        }
+
+        Say ('External process ended with exit code: ' + $process.ExitCode)
+    }
+    catch {
+        Write-Warning ('Could not open or wait for the external script: ' + $_.Exception.Message)
+    }
 }
 
 try {
