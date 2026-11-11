@@ -4,8 +4,8 @@ P2.ps1 - Notebook diagnostic assistant.
 Read-only hardware discovery plus optional human tests.
 Run in Windows PowerShell. No installation, reboot or data upload.
 #>
-[CmdletBinding()]
-param([switch]$Quick)
+# Inline-compatible script: no top-level param block for Invoke-Expression.
+$Quick = $false
 
 $ErrorActionPreference = 'Stop'
 $script:Lines = New-Object 'System.Collections.Generic.List[string]'
