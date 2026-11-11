@@ -10,12 +10,11 @@ Run in Windows PowerShell as Administrator, using the TARGET USER account.
 Automatic restart can be disabled with -NoRestart.
 P1 never calls Windows-Update-All.ps1/u.ps1 because those request AutoReboot.
 #>
-[CmdletBinding()]
-param(
-    [switch]$SkipPrograms,
-    [switch]$SkipUpdates,
-    [switch]$NoRestart
-)
+# Inline-compatible script: Invoke-Expression cannot bind a top-level param block.
+# Use $false by default; for custom switches run a downloaded file with explicit arguments.
+$SkipPrograms = $false
+$SkipUpdates = $false
+$NoRestart = $false
 
 $ErrorActionPreference = 'Stop'
 $script:Problems = New-Object 'System.Collections.Generic.List[string]'
