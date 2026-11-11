@@ -1,0 +1,57 @@
+name: Windows-Tools PowerShell syntax checks
+
+on:
+  push:
+    paths:
+      - 'P1.ps1'
+      - 'P1-BetaTest.ps1'
+      - 'P2.ps1'
+      - 'p.ps1'
+      - '.github/workflows/powershell-check.yml'
+  workflow_dispatch:
+
+jobs:
+  powershell-51-parse:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse all scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in @('P1.ps1','P1-BetaTest.ps1','P2.ps1','p.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD.Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Host ($file + ': ' + $_.Message) }
+              throw ('PowerShell syntax failed: ' + $file)
+            }
+            Write-Host ('Syntax OK: ' + $file)
+          }
+      - name: Check critical P1 invariants
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $s = Get-Content .\P1.ps1 -Raw
+          if ($s -match '(?im)^\s*(?:&\s*)?shutdown(?:\.exe)?\s+/(?:r|g)' -or
+              $s -match '(?im)^\s*Restart-Computer\b') {
+            throw 'Unexpected automatic restart command in P1'
+          }
+          foreach ($needle in @(
+              'Check-ExpectedWindowsProfile',
+              'Test-MyASUSInstalled',
+              'Test-ASUSSystemControlInterface',
+              'Open-MyASUSForUpdates',
+              '9N7R5S6B0ZZH',
+              'Check PDF and RAR default app assignments'
+          )) {
+            if (-not $s.Contains($needle)) {
+              throw ('P1 beta feature missing: ' + $needle)
+            }
+          }
+          Write-Host 'P1 beta static invariants OK'
