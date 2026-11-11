@@ -3,7 +3,7 @@
 <#
 P1.ps1 - Windows 11 post-install setup.
 Order: existing USB programs (p.ps1) -> profile settings -> Office shortcuts
--> MyASUS (ASUS only) -> Windows Update including offered drivers
+-> Windows Update including offered drivers -> MyASUS (ASUS only)
 -> guided current-user default-app associations -> manual restart by user.
 
 Run in Windows PowerShell as Administrator, using the TARGET USER account.
@@ -64,6 +64,13 @@ function Set-DesktopIcons {
     )
     foreach ($id in $ids) { Set-ValueIfDifferent -Path $path -Name $id -Value 0 -Type DWord }
     Write-Host 'Desktop icons enabled (visible after Explorer refresh/sign-in).'
+}
+function Check-ExpectedWindowsProfile {
+    $currentName = [Environment]::UserName
+    Write-Host ('Windows profile: ' + $currentName + ' (expected User)')
+    if ($currentName -cne 'User') {
+        $script:Manual.Add('Windows account is ' + $currentName + '; expected User. Existing account will not be renamed automatically.')
+    }
 }
 function Set-ThailandProfile {
     $current = Get-Culture
@@ -151,24 +158,73 @@ function Add-OfficeShortcuts {
     }
     if ($missing.Count) { throw ('Office apps not installed/found: ' + ($missing -join ', ')) }
 }
+function Test-MyASUSInstalled {
+    try { return (@(Get-AppxPackage -Name 'B9ECED6F.ASUSPCAssistant' -ErrorAction Stop).Count -gt 0) }
+    catch { return $false }
+}
+function Test-ASUSSystemControlInterface {
+    try {
+        $devices = @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
+            Where-Object { $_.Name -match 'ASUS System Control Interface' -and $_.ConfigManagerErrorCode -eq 0 })
+        return ($devices.Count -gt 0)
+    }
+    catch { return $false }
+}
 function Install-MyASUSIfAppropriate {
     $pc = Get-CimInstance Win32_ComputerSystem
     if ($pc.Manufacturer -notmatch 'ASUS|ASUSTeK') {
-        Write-Host ('Skipped MyASUS: manufacturer is ' + $pc.Manufacturer)
+        Write-Host ('Skipping MyASUS: manufacturer is ' + $pc.Manufacturer)
         return
     }
-    $present = @(Get-AppxPackage -Name 'B9ECED6F.ASUSPCAssistant' -ErrorAction SilentlyContinue)
-    if ($present.Count) { Write-Host 'MyASUS already installed.'; return }
-    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-    if (-not $winget) {
-        $script:Manual.Add('Install MyASUS from Microsoft Store; WinGet unavailable.')
+    if (Test-MyASUSInstalled) { Write-Host 'MyASUS already installed. Skipped.' }
+    else {
+        $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($winget) {
+            Write-Host 'Installing MyASUS from official Microsoft Store using WinGet.'
+            & $winget.Source install --id 9N7R5S6B0ZZH --exact --source msstore --silent --accept-source-agreements --accept-package-agreements
+            if ($LASTEXITCODE -ne 0 -and -not (Test-MyASUSInstalled)) {
+                Write-Warning 'Store-source install failed. Refreshing msstore source and retrying once.'
+                & $winget.Source source update --name msstore
+                & $winget.Source install --id 9N7R5S6B0ZZH --exact --source msstore --silent --accept-source-agreements --accept-package-agreements
+            }
+        }
+        if (-not (Test-MyASUSInstalled)) {
+            Write-Warning 'MyASUS was not installed through WinGet. Opening official Microsoft Store.'
+            try { Start-Process 'ms-windows-store://pdp/?ProductId=9N7R5S6B0ZZH' -ErrorAction Stop }
+            catch { Start-Process 'https://www.microsoft.com/store/apps/9N7R5S6B0ZZH' }
+            [void](Read-Host 'Install MyASUS in Microsoft Store, then press Enter to recheck')
+        }
+        if (-not (Test-MyASUSInstalled)) {
+            $script:Manual.Add('MyASUS still missing: troubleshoot Microsoft Store connection/certificate, then use the official Store.')
+            throw 'MyASUS installation could not be verified for this account.'
+        }
+        Write-Host 'Verified: MyASUS installed.' -ForegroundColor Green
+    }
+    if (Test-ASUSSystemControlInterface) {
+        Write-Host 'ASUS System Control Interface device driver detected.'
+    }
+    else {
+        $script:Manual.Add('ASUS System Control Interface not detected. MyASUS System Update may be unavailable; check official ASUS drivers for this model.')
+        Write-Warning 'MyASUS may not have System Update without the ASUS System Control Interface driver.'
+    }
+}
+function Open-MyASUSForUpdates {
+    $pc = Get-CimInstance Win32_ComputerSystem
+    if ($pc.Manufacturer -notmatch 'ASUS|ASUSTeK') { return }
+    if (-not (Test-MyASUSInstalled)) { return }
+    $app = @(Get-StartApps -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq 'MyASUS' } | Select-Object -First 1)
+    if ($app.Count -eq 0 -or [string]::IsNullOrWhiteSpace($app[0].AppID)) {
+        $script:Manual.Add('Open MyASUS from Start > System Update and review pending drivers.')
         return
     }
-    # Official ASUS Store ID. MyASUS availability/driver support varies by model.
-    & $winget.Source install --id 9N7R5S6B0ZZH --exact --source msstore --silent --accept-source-agreements --accept-package-agreements
-    if ($LASTEXITCODE -ne 0) {
-        throw ('MyASUS Microsoft Store install failed: exit ' + $LASTEXITCODE)
-    }
+    # The app provides no documented supported command-line interface for
+    # choosing updates. Manual selection is required, especially for BIOS.
+    Start-Process explorer.exe -ArgumentList ('shell:AppsFolder\' + $app[0].AppID)
+    Write-Host 'In MyASUS, select System Update > Update selected items.'
+    Write-Host 'Review Update History afterward; defer BIOS/firmware updates until ready for a manual restart.'
+    [void](Read-Host 'After reviewing MyASUS System Update, press Enter to continue P1')
+    $script:Manual.Add('Verify MyASUS System Update / Update History on this PC.')
 }
 function Install-RecommendedUpdatesWithoutRestart {
     $session = New-Object -ComObject Microsoft.Update.Session
@@ -276,13 +332,15 @@ try {
     Write-Host 'Run under the Windows account whose desktop and settings you want to change.'
     Write-Host 'P1 does not schedule a restart. Restart Windows manually when ready.'
 
+    Step 'Check Windows profile name (User)' { Check-ExpectedWindowsProfile }
     if (-not $SkipPrograms) { Step 'Existing USB programs and Office (p.ps1)' { Run-ExistingPrograms } }
     Step 'Thai calendar and grave-accent switch' { Set-ThailandProfile }
     Step 'Windows desktop icons' { Set-DesktopIcons }
     Step 'Single static wallpaper' { Set-StaticWallpaper }
     Step 'Word / Excel / PowerPoint desktop shortcuts' { Add-OfficeShortcuts }
-    Step 'MyASUS (ASUS computers only)' { Install-MyASUSIfAppropriate }
     if (-not $SkipUpdates) { Step 'Windows updates and offered drivers; no AutoReboot' { Install-RecommendedUpdatesWithoutRestart } }
+    Step 'Install and verify MyASUS' { Install-MyASUSIfAppropriate }
+    Step 'Open MyASUS to review remaining updates' { Open-MyASUSForUpdates }
     Step 'Check PDF and RAR default app assignments' { Check-FileAssociations }
 
     Write-Host ''
