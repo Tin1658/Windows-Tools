@@ -240,27 +240,29 @@ function Run-ExistingPrograms {
     Write-Host 'p.ps1 finished. Review its own warnings; old script may return 0 after an error.'
 }
 function Check-FileAssociations {
+    # PDF belongs to Acrobat Reader; image file associations such as PNG are untouched.
     $rar = Get-CurrentUserAssociation '.rar'
-    $png = Get-CurrentUserAssociation '.png'
+    $pdf = Get-CurrentUserAssociation '.pdf'
     Write-Host ('Current .rar default ProgID: ' + $(if($rar){$rar}else{'unknown'}))
-    Write-Host ('Current .png default ProgID: ' + $(if($png){$png}else{'unknown'}))
+    Write-Host ('Current .pdf default ProgID: ' + $(if($pdf){$pdf}else{'unknown'}))
     $rarDone = $rar -like 'WinRAR*'
-    $pngDone = $png -match 'Acro|Adobe'
-    if (-not ($rarDone -and $pngDone)) {
+    $pdfDone = $pdf -match 'Acro|Adobe'
+    if (-not ($rarDone -and $pdfDone)) {
         Write-Host 'Windows 11 protects current-user defaults; selecting an app requires your confirmation.'
-        Write-Host 'Find .rar and choose WinRAR. For .png, choose Adobe only if it is listed as supported.'
+        Write-Host 'Find .rar and choose WinRAR. Find .pdf and choose Adobe Acrobat Reader.'
+        Write-Host 'Leave .png unchanged.'
         Start-Process 'ms-settings:defaultapps'
         [void](Read-Host 'After adjusting defaults, press Enter to verify and continue')
         $rar = Get-CurrentUserAssociation '.rar'
-        $png = Get-CurrentUserAssociation '.png'
+        $pdf = Get-CurrentUserAssociation '.pdf'
         $rarDone = $rar -like 'WinRAR*'
-        $pngDone = $png -match 'Acro|Adobe'
+        $pdfDone = $pdf -match 'Acro|Adobe'
     }
     if (-not $rarDone) {
         $script:Manual.Add('Current .rar default is not WinRAR. Complete it in Default apps.')
     }
-    if (-not $pngDone) {
-        $script:Manual.Add('Current .png default is not Adobe. Acrobat Reader may not register as a PNG viewer.')
+    if (-not $pdfDone) {
+        $script:Manual.Add('Current .pdf default was not confirmed as Adobe Acrobat Reader. Check Default apps.')
     }
 }
 
@@ -281,7 +283,7 @@ try {
     Step 'Word / Excel / PowerPoint desktop shortcuts' { Add-OfficeShortcuts }
     Step 'MyASUS (ASUS computers only)' { Install-MyASUSIfAppropriate }
     if (-not $SkipUpdates) { Step 'Windows updates and offered drivers; no AutoReboot' { Install-RecommendedUpdatesWithoutRestart } }
-    Step 'Check PNG and RAR default app assignments' { Check-FileAssociations }
+    Step 'Check PDF and RAR default app assignments' { Check-FileAssociations }
 
     Write-Host ''
     Write-Host '============= P1 SUMMARY =============' -ForegroundColor Green
