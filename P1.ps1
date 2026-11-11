@@ -4,17 +4,16 @@
 P1.ps1 - Windows 11 post-install setup.
 Order: existing USB programs (p.ps1) -> profile settings -> Office shortcuts
 -> MyASUS (ASUS only) -> Windows Update including offered drivers
--> guided current-user default-app associations -> one final reboot.
+-> guided current-user default-app associations -> manual restart by user.
 
 Run in Windows PowerShell as Administrator, using the TARGET USER account.
-Automatic restart can be disabled with -NoRestart.
+P1 never schedules a Windows restart. Restart manually when ready.
 P1 never calls Windows-Update-All.ps1/u.ps1 because those request AutoReboot.
 #>
 # Inline-compatible script: Invoke-Expression cannot bind a top-level param block.
-# Use $false by default; for custom switches run a downloaded file with explicit arguments.
+# Defaults for optional stages.
 $SkipPrograms = $false
 $SkipUpdates = $false
-$NoRestart = $false
 
 $ErrorActionPreference = 'Stop'
 $script:Problems = New-Object 'System.Collections.Generic.List[string]'
@@ -273,7 +272,7 @@ try {
     }
     Write-Host '============= WINDOWS-TOOLS P1 =============' -ForegroundColor Green
     Write-Host 'Run under the Windows account whose desktop and settings you want to change.'
-    Write-Host 'Only P1 schedules a reboot, at the very end. P2 never reboots.'
+    Write-Host 'P1 does not schedule a restart. Restart Windows manually when ready.'
 
     if (-not $SkipPrograms) { Step 'Existing USB programs and Office (p.ps1)' { Run-ExistingPrograms } }
     Step 'Thai calendar and grave-accent switch' { Set-ThailandProfile }
@@ -291,17 +290,14 @@ try {
     foreach ($x in $script:Problems) { Write-Warning ('FAILED: ' + $x) }
     Write-Host 'Microsoft Office automatic-updates setting was intentionally left unchanged.'
 
-    if ($NoRestart) {
-        Write-Host 'NoRestart specified. Restart yourself after completing any manual steps.'
+    if ($script:Problems.Count -gt 0 -or $script:Manual.Count -gt 0) {
+        Write-Warning 'Some setup steps need attention. Review them before restarting manually.'
     }
-    elseif ($script:Problems.Count -gt 0 -or $script:Manual.Count -gt 0) {
-        Write-Warning 'Failed or unfinished/manual steps remain. Automatic restart cancelled; finish them and run P1 again.'
+    if ($script:RestartRequired) {
+        Write-Host 'Windows Update reports a restart is required; restart manually when ready.' -ForegroundColor Yellow
     }
     else {
-        Write-Warning 'A single Windows restart is scheduled in 60 seconds. Save your work.'
-        Write-Host 'To cancel the scheduled restart, run: shutdown /a'
-        & shutdown.exe /r /t 60 /c "Windows-Tools P1 setup finished"
-        if ($LASTEXITCODE -ne 0) { Write-Warning 'Could not schedule the final restart.' }
+        Write-Host 'P1 finished. No restart command was issued. Restart manually when ready.' -ForegroundColor Green
     }
 }
 catch {
