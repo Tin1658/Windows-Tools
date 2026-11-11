@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 P2.ps1 - Notebook diagnostic assistant.
 Read-only hardware discovery plus optional human tests.
