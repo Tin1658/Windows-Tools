@@ -226,11 +226,141 @@ function Open-MyASUSForUpdates {
     [void](Read-Host 'After reviewing MyASUS System Update, press Enter to continue P1')
     $script:Manual.Add('Verify MyASUS System Update / Update History on this PC.')
 }
+# WUA supports asynchronous download/install jobs with real progress snapshots.
+# Percentages and byte totals come from WUA; ETAs are estimates based on elapsed progress.
+function Format-WuaBytes([double]$Bytes) {
+    if ($Bytes -lt 0) { return 'unknown size' }
+    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
+    return ('{0:N1} MB' -f ($Bytes / 1MB))
+}
+function Format-WuaEta([double]$Seconds) {
+    if ($Seconds -lt 0 -or [double]::IsNaN($Seconds) -or [double]::IsInfinity($Seconds)) {
+        return 'calculating'
+    }
+    if ($Seconds -gt 86400) { return 'over 1 day (very rough)' }
+    $remaining = [TimeSpan]::FromSeconds([Math]::Ceiling($Seconds))
+    if ($remaining.TotalHours -ge 1) {
+        return ('about {0}h {1}m' -f [int][Math]::Floor($remaining.TotalHours),$remaining.Minutes)
+    }
+    return ('about {0}m {1}s' -f $remaining.Minutes,$remaining.Seconds)
+}
+function New-WuaCallback {
+    # WUA accepts an Automation callback exposing DISPID 0.
+    # The callback only satisfies WUA's async contract; progress is polled
+    # from the job so it never touches PowerShell from a COM background thread.
+    if (-not ('WindowsToolsWuaCallback' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[ComVisible(true)]
+[Guid("FDCBC9B8-4028-43F0-83EB-17F3C94D70BB")]
+[ClassInterface(ClassInterfaceType.AutoDual)]
+public sealed class WindowsToolsWuaCallback {
+    [DispId(0)]
+    public void Invoke(object job, object args) { }
+}
+'@ -ErrorAction Stop
+    }
+    return (New-Object WindowsToolsWuaCallback)
+}
+function Invoke-WuaWithProgress($Worker,[string]$Stage,$SelectedUpdates) {
+    $job = $null
+    $cbProgress = $null
+    $cbCompleted = $null
+    $activity = 'Windows Update and drivers - ' + $Stage
+    try {
+        try {
+            $cbProgress = New-WuaCallback
+            $cbCompleted = New-WuaCallback
+            if ($Stage -eq 'Download') {
+                $job = $Worker.BeginDownload($cbProgress,$cbCompleted,$null)
+            } else {
+                $job = $Worker.BeginInstall($cbProgress,$cbCompleted,$null)
+            }
+        }
+        catch {
+            Write-Warning ('Could not start asynchronous ' + $Stage + ': ' + $_.Exception.Message)
+            Write-Warning 'Using standard Windows Update method. Live MB/ETA unavailable in this mode.'
+            if ($Stage -eq 'Download') { return $Worker.Download() }
+            return $Worker.Install()
+        }
+
+        $started = Get-Date
+        $lastPrinted = [datetime]::MinValue
+        $lastPercent = -1
+        Write-Host ($Stage + ' started for ' + $SelectedUpdates.Count + ' updates. Checking progress every 3 seconds.')
+        while (-not $job.IsCompleted) {
+            $status = 'Waiting for Windows Update progress... ETA unavailable'
+            $percent = 0
+            $etaSeconds = -1.0
+            try {
+                # GetProgress returns a snapshot; it must be fetched again each poll.
+                $p = $job.GetProgress()
+                $percent = [Math]::Max(0,[Math]::Min(100,[int]$p.PercentComplete))
+                $elapsed = ((Get-Date) - $started).TotalSeconds
+                $index = [Math]::Max(0,[Math]::Min(($SelectedUpdates.Count - 1),[int]$p.CurrentUpdateIndex))
+                $itemLabel = ('[{0}/{1}]' -f ($index + 1),$SelectedUpdates.Count)
+                if ($Stage -eq 'Download') {
+                    $downloaded = 0.0
+                    $total = 0.0
+                    $hasDownloaded = [double]::TryParse([string]$p.TotalBytesDownloaded,
+                        [System.Globalization.NumberStyles]::Float,
+                        [System.Globalization.CultureInfo]::InvariantCulture,[ref]$downloaded)
+                    $hasTotal = [double]::TryParse([string]$p.TotalBytesToDownload,
+                        [System.Globalization.NumberStyles]::Float,
+                        [System.Globalization.CultureInfo]::InvariantCulture,[ref]$total)
+                    if ($hasDownloaded -and $hasTotal -and $total -gt 0) {
+                        $status = ('{0} {1} / {2} ({3}%)' -f $itemLabel,(Format-WuaBytes $downloaded),(Format-WuaBytes $total),$percent)
+                        if ($elapsed -ge 10 -and $downloaded -gt 0 -and $total -gt $downloaded) {
+                            $etaSeconds = ($total - $downloaded) * $elapsed / $downloaded
+                        }
+                    } else {
+                        $status = ('{0} {1}% (download size not reported)' -f $itemLabel,$percent)
+                    }
+                } else {
+                    $status = ('{0} {1}% installed (current: {2}%)' -f $itemLabel,$percent,[int]$p.CurrentUpdatePercentComplete)
+                }
+                if ($etaSeconds -lt 0 -and $elapsed -ge 20 -and $percent -ge 5 -and $percent -lt 100) {
+                    $etaSeconds = $elapsed * (100 - $percent) / $percent
+                }
+            }
+            catch {
+                $status = 'Windows Update is working; progress snapshot unavailable for now'
+            }
+            $etaText = Format-WuaEta $etaSeconds
+            Write-Progress -Activity $activity -Status ($status + ' | ETA: ' + $etaText) -PercentComplete $percent -SecondsRemaining ([int]$etaSeconds)
+            $now = Get-Date
+            if (($now - $lastPrinted).TotalSeconds -ge 15 -or $percent -ge ($lastPercent + 10)) {
+                Write-Host ('[{0}] {1} | ETA: {2}' -f $Stage.ToUpperInvariant(),$status,$etaText)
+                $lastPrinted = $now
+                $lastPercent = $percent
+            }
+            Start-Sleep -Seconds 3
+        }
+        if ($Stage -eq 'Download') { $result = $Worker.EndDownload($job) }
+        else { $result = $Worker.EndInstall($job) }
+        Write-Host ('{0} finished. WUA result code: {1}.' -f $Stage,$result.ResultCode) -ForegroundColor Green
+        return $result
+    }
+    finally {
+        Write-Progress -Activity $activity -Completed
+        if ($null -ne $job) {
+            try {
+                if (-not $job.IsCompleted) { $job.RequestAbort() }
+                $job.CleanUp()  # Releases callbacks after operation completes.
+            } catch { Write-Warning ('Could not clean up Windows Update job: ' + $_.Exception.Message) }
+        }
+        # Keep callback objects alive until job cleanup has completed.
+        $cbProgress = $null
+        $cbCompleted = $null
+    }
+}
+
 function Install-RecommendedUpdatesWithoutRestart {
     $session = New-Object -ComObject Microsoft.Update.Session
     $session.ClientApplicationID = 'Windows-Tools P1'
     $searcher = $session.CreateUpdateSearcher()
-    Write-Host 'Searching assigned Windows updates and drivers. This may take a while.'
+    Write-Host 'Searching assigned Windows updates and drivers. Scan progress/ETA is not supplied by Windows.'
     $found = $searcher.Search('IsInstalled=0 and IsHidden=0 and IsAssigned=1')
     $updates = New-Object -ComObject Microsoft.Update.UpdateColl
     for ($i=0; $i -lt $found.Updates.Count; $i++) {
@@ -243,13 +373,17 @@ function Install-RecommendedUpdatesWithoutRestart {
         [void]$updates.Add($update)
         Write-Host ('Queued: ' + $update.Title)
     }
+    Write-Host ('Queued updates (Windows and offered drivers): ' + $updates.Count)
     if ($updates.Count -eq 0) {
         Write-Host 'No pending assigned updates. Optional/OEM drivers may still exist.'
         return
     }
     $downloader = $session.CreateUpdateDownloader()
     $downloader.Updates = $updates
-    [void]$downloader.Download()
+    $downloadOutcome = Invoke-WuaWithProgress -Worker $downloader -Stage 'Download' -SelectedUpdates $updates
+    if ($downloadOutcome.ResultCode -notin @(2,3)) {
+        Write-Warning ('Windows Update download returned code ' + $downloadOutcome.ResultCode + '. Checking each item.')
+    }
     $ready = New-Object -ComObject Microsoft.Update.UpdateColl
     for ($i=0; $i -lt $updates.Count; $i++) {
         $update = $updates.Item($i)
@@ -265,7 +399,8 @@ function Install-RecommendedUpdatesWithoutRestart {
     if ($installer.RebootRequiredBeforeInstallation) {
         throw 'Windows requires a reboot BEFORE these updates can be installed. Run P1 again afterward.'
     }
-    $result = $installer.Install() # Does not call Restart-Computer or AutoReboot.
+    $result = Invoke-WuaWithProgress -Worker $installer -Stage 'Install' -SelectedUpdates $ready
+    # No Restart-Computer or AutoReboot is called by P1.
     $script:RestartRequired = $script:RestartRequired -or [bool]$result.RebootRequired
     $failed = @()
     for ($i=0; $i -lt $ready.Count; $i++) {
@@ -293,7 +428,7 @@ function Run-ExistingPrograms {
     Write-Warning 'Keep your USB Programs folder connected. Existing p.ps1 may request input.'
     & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $source
     if ($LASTEXITCODE -ne 0) { throw ('p.ps1 exit code ' + $LASTEXITCODE) }
-    Write-Host 'p.ps1 finished. Review its own warnings; old script may return 0 after an error.'
+    Write-Host 'p.ps1 finished. Check any SKIPPED or WARNING messages for optional items.'
 }
 function Check-FileAssociations {
     # PDF belongs to Acrobat Reader; image file associations such as PNG are untouched.
