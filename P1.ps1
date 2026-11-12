@@ -430,6 +430,24 @@ function Run-ExistingPrograms {
     if ($LASTEXITCODE -ne 0) { throw ('p.ps1 exit code ' + $LASTEXITCODE) }
     Write-Host 'p.ps1 finished. Check any SKIPPED or WARNING messages for optional items.'
 }
+function Run-PostSetupBetaTest {
+    # This is a read-only verification step; it does not install anything.
+    $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'P1-BetaTest.ps1' } else { '' }
+    if ($local -and (Test-Path -LiteralPath $local -PathType Leaf)) {
+        $source = $local
+    } else {
+        $source = Join-Path $env:TEMP 'WindowsTools-P1-BetaTest.ps1'
+        $uri = 'https://raw.githubusercontent.com/Tin1658/Windows-Tools/main/P1-BetaTest.ps1'
+        Invoke-WebRequest -Uri $uri -UseBasicParsing -OutFile $source -ErrorAction Stop
+    }
+    Write-Host ('Running read-only Beta Test: ' + $source)
+    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $source
+    if ($LASTEXITCODE -ne 0) {
+        throw ('Beta Test reported failed checks (exit ' + $LASTEXITCODE + '). Review the P1-BetaTest report on Desktop.')
+    }
+    Write-Host 'Beta Test completed. Review warnings and manual checks in the Desktop report.'
+}
+
 function Check-FileAssociations {
     # PDF belongs to Acrobat Reader; image file associations such as PNG are untouched.
     $rar = Get-CurrentUserAssociation '.rar'
@@ -477,6 +495,7 @@ try {
     Step 'Install and verify MyASUS' { Install-MyASUSIfAppropriate }
     Step 'Open MyASUS to review remaining updates' { Open-MyASUSForUpdates }
     Step 'Check PDF and RAR default app assignments' { Check-FileAssociations }
+    Step 'Read-only post-setup Beta Test and report' { Run-PostSetupBetaTest }
 
     Write-Host ''
     Write-Host '============= P1 SUMMARY =============' -ForegroundColor Green
