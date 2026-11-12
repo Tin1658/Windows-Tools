@@ -82,7 +82,18 @@ catch { Check 'ASUS hardware check' 'WARN' $_.Exception.Message }
 
 $log = Join-Path $desktop 'P1-Setup.log'
 Check 'P1 setup log' $(if(Test-Path -LiteralPath $log){'PASS'}else{'WARN'}) $log
-Check 'Windows Update / driver status' 'MANUAL' 'Read the P1-Setup.log for pending or failed updates. Run P1 again after manually restarting if needed.'
+# Verify real pending assigned Windows/driver updates, not merely the P1 log text.
+try {
+    Write-Host 'Checking for remaining assigned Windows updates and drivers (scan duration not available)...'
+    $wuSession = New-Object -ComObject Microsoft.Update.Session
+    $wuSearcher = $wuSession.CreateUpdateSearcher()
+    $pending = $wuSearcher.Search('IsInstalled=0 and IsHidden=0 and IsAssigned=1')
+    $pendingCount = [int]$pending.Updates.Count
+    Check 'Windows Update / offered drivers pending' $(if($pendingCount -eq 0){'PASS'}else{'WARN'}) ('Currently offered pending items: ' + $pendingCount + '. Optional/OEM drivers are checked separately.')
+} catch {
+    Check 'Windows Update / offered drivers pending' 'WARN' ('Could not query pending updates: ' + $_.Exception.Message)
+}
+Check 'Update progress log' 'MANUAL' 'Look at P1-Setup.log for [DOWNLOAD] / [INSTALL] status and ETA. The ETA is an estimate, not a guarantee.'
 Check 'Restart policy' 'PASS' 'P1 has no automatic reboot command. Restart manually when ready.'
 
 Write-Host ''
@@ -99,4 +110,9 @@ try {
     Write-Host ('Report saved: ' + $reportPath) -ForegroundColor Green
 } catch {
     Write-Warning ('Could not save beta-test report: ' + $_.Exception.Message)
+}
+# A failed automated check should not be reported as a successful beta run.
+if (@($results | Where-Object { $_.Status -eq 'FAIL' }).Count -gt 0) {
+    Write-Warning 'Beta Test has failed checks. See the report; no changes were made by this test.'
+    exit 2
 }
