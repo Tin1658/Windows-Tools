@@ -1,216 +1,63 @@
 #Requires -Version 5.1
 <#
-P2.ps1 - Notebook diagnostic assistant.
-Read-only hardware discovery plus optional human tests.
-Run in Windows PowerShell. No installation, reboot or data upload.
+P2.ps1 - Battery health only.
+Shows one battery health percentage (full charge capacity / design capacity).
+Does not show current battery charge, run other device tests, or create a report.
+Read-only. No installation, reboot, or data upload.
+Compatible with: irm .../P2.ps1 | iex
 #>
-# Inline-compatible script: no top-level param block for Invoke-Expression.
-$Quick = $false
 
 $ErrorActionPreference = 'Stop'
-$script:Lines = New-Object 'System.Collections.Generic.List[string]'
-$desktop = [Environment]::GetFolderPath('Desktop')
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$reportPath = Join-Path $desktop ("P2-Diagnostic-" + $stamp + ".txt")
+$health = $null
 
-function Report([string]$Title, [string]$Value) {
-    $line = ('{0}: {1}' -f $Title, $Value)
-    Write-Host $line
-    $script:Lines.Add($line)
-}
-function Try-GetCim([string]$ClassName, [string]$Namespace = 'root/cimv2') {
-    try { @(Get-CimInstance -Namespace $Namespace -ClassName $ClassName -ErrorAction Stop) }
-    catch { @() }
-}
-function Test-Manual([string]$Prompt) {
-    if ($Quick) { return 'SKIPPED (-Quick)' }
-    $answer = Read-Host ($Prompt + ' [Y=yes / N=no / Enter=skip]')
-    switch -Regex ($answer) {
-        '^(y|yes)$' { return 'PASS (user confirmed)' }
-        '^(n|no)$' { return 'FAIL (user reported)' }
-        default { return 'NOT TESTED' }
-    }
-}
-
-function Show-ColorTest {
-    try {
-        Add-Type -AssemblyName System.Windows.Forms
-        Add-Type -AssemblyName System.Drawing
-        $palette = @(
-            @{Name='RED';   Color=[System.Drawing.Color]::Red;   Fore=[System.Drawing.Color]::White},
-            @{Name='GREEN'; Color=[System.Drawing.Color]::Green; Fore=[System.Drawing.Color]::Black},
-            @{Name='BLUE';  Color=[System.Drawing.Color]::Blue;  Fore=[System.Drawing.Color]::White},
-            @{Name='WHITE'; Color=[System.Drawing.Color]::White; Fore=[System.Drawing.Color]::Black},
-            @{Name='BLACK'; Color=[System.Drawing.Color]::Black; Fore=[System.Drawing.Color]::White}
-        )
-        $form = New-Object System.Windows.Forms.Form
-        $form.Text = 'P2 - Display color check'
-        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
-        $form.WindowState = [System.Windows.Forms.FormWindowState]::Maximized
-        $form.TopMost = $true
-        $form.KeyPreview = $true
-        $form.BackColor = $palette[0].Color
-        $label = New-Object System.Windows.Forms.Label
-        $label.Dock = [System.Windows.Forms.DockStyle]::Top
-        $label.Height = 70
-        $label.Font = New-Object System.Drawing.Font('Segoe UI',22,[System.Drawing.FontStyle]::Bold)
-        $label.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-        $label.BackColor = [System.Drawing.Color]::Transparent
-        $label.ForeColor = $palette[0].Fore
-        $label.Text = 'RED 1/5 - SPACE: next / ESC: exit'
-        $form.Controls.Add($label)
-        $script:P2ColorIndex = 0
-        $onKey = {
-            param($sender,$e)
-            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
-                $sender.Close()
-            }
-            elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Space) {
-                $script:P2ColorIndex++
-                if ($script:P2ColorIndex -ge $palette.Count) {
-                    $sender.Close()
-                }
-                else {
-                    $sender.BackColor = $palette[$script:P2ColorIndex].Color
-                    $label.ForeColor = $palette[$script:P2ColorIndex].Fore
-                    $label.Text = ('{0} {1}/5 - SPACE: next / ESC: exit' -f $palette[$script:P2ColorIndex].Name, ($script:P2ColorIndex + 1))
-                }
-                $e.SuppressKeyPress = $true
-            }
-        }.GetNewClosure()
-        $form.Add_KeyDown($onKey)
-        [void]$form.ShowDialog()
-        $form.Dispose()
-    }
-    catch { Write-Warning ('Display test could not open: ' + $_.Exception.Message) }
-}
-
+# Prefer firmware-reported design and full-charge capacities.
 try {
-    Write-Host '========== P2 NOTEBOOK DIAGNOSTICS ==========' -ForegroundColor Cyan
-    Report 'Checked at' (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-    $pc = @(Try-GetCim 'Win32_ComputerSystem' | Select-Object -First 1)
-    $bios = @(Try-GetCim 'Win32_BIOS' | Select-Object -First 1)
-    $product = @(Try-GetCim 'Win32_ComputerSystemProduct' | Select-Object -First 1)
-    $os = @(Try-GetCim 'Win32_OperatingSystem' | Select-Object -First 1)
+    $designs = @(Get-CimInstance -Namespace 'root/wmi' -ClassName 'BatteryStaticData' -ErrorAction Stop)
+    $fulls = @(Get-CimInstance -Namespace 'root/wmi' -ClassName 'BatteryFullChargedCapacity' -ErrorAction Stop)
 
-    if ($pc.Count -gt 0) {
-        Report 'Manufacturer' ([string]$pc[0].Manufacturer)
-        Report 'Notebook model' ([string]$pc[0].Model)
-        Report 'Memory GB' ([math]::Round($pc[0].TotalPhysicalMemory / 1GB, 1))
+    foreach ($battery in $designs) {
+        $match = @($fulls | Where-Object { $_.InstanceName -eq $battery.InstanceName } | Select-Object -First 1)
+        if ($match.Count -eq 0) { continue }
+        $designCapacity = [double]$battery.DesignedCapacity
+        $fullCapacity = [double]$match[0].FullChargedCapacity
+        if ($designCapacity -gt 0 -and $fullCapacity -gt 0) {
+            $health = [math]::Round(100.0 * $fullCapacity / $designCapacity, 1)
+            break
+        }
     }
-    if ($product.Count -gt 0) { Report 'Product version' ([string]$product[0].Version) }
-    if ($bios.Count -gt 0) {
-        Report 'Serial number' ([string]$bios[0].SerialNumber)
-        Report 'BIOS version' ([string]$bios[0].SMBIOSBIOSVersion)
-    }
-    if ($os.Count -gt 0) { Report 'Windows' ([string]$os[0].Caption + ' ' + [string]$os[0].Version) }
+}
+catch {
+    # Some notebooks do not expose battery capacity through WMI.
+}
 
-    Write-Host ''
-    Write-Host '--- 1. DISPLAY COLORS ---' -ForegroundColor Yellow
-    if (-not $Quick) { Show-ColorTest }
-    Report 'Display color test' (Test-Manual 'Did all colors look normal, with no lines/stuck pixels?')
-
-    Write-Host ''
-    Write-Host '--- 2. MOUSE ---' -ForegroundColor Yellow
-    $mice = @()
-    try { $mice = @(Get-PnpDevice -Class Mouse -PresentOnly -ErrorAction Stop) } catch {}
-    Report 'Windows mouse devices' ($(if($mice.Count){($mice.FriendlyName -join '; ')}else{'none reported'}))
-    Report 'Mouse manual check' (Test-Manual 'Move an external mouse and test left/right clicks. OK?')
-
-    Write-Host ''
-    Write-Host '--- 3. TOUCHPAD ---' -ForegroundColor Yellow
-    $touch = @()
+# If WMI lacks capacity readings, use a temporary XML battery report instead.
+if ($null -eq $health) {
+    $xmlFile = Join-Path $env:TEMP ('WindowsTools-Battery-' + [guid]::NewGuid().ToString('N') + '.xml')
     try {
-        $touch = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object {
-            $_.FriendlyName -match 'Touchpad|Touch Pad|ELAN|Synaptics'
-        })
-    } catch {}
-    Report 'Touchpad candidates' ($(if($touch.Count){($touch.FriendlyName -join '; ')}else{'not identified; does NOT mean broken'}))
-    Report 'Touchpad manual check' (Test-Manual 'Use touchpad to move cursor and click. OK?')
-
-    Write-Host ''
-    Write-Host '--- 4. KEYBOARD ---' -ForegroundColor Yellow
-    $keyboards = @()
-    try { $keyboards = @(Get-PnpDevice -Class Keyboard -PresentOnly -ErrorAction Stop) } catch {}
-    Report 'Windows keyboards' ($(if($keyboards.Count){($keyboards.FriendlyName -join '; ')}else{'none reported'}))
-    if ($Quick) {
-        Report 'Keyboard manual check' 'SKIPPED (-Quick)'
-    } else {
-        $typed = Read-Host 'Type TEST123 using the notebook keyboard, then Enter (blank to skip)'
-        $state = if ($typed -ceq 'TEST123') { 'PASS (sample keys only)' }
-                 elseif ([string]::IsNullOrWhiteSpace($typed)) { 'NOT TESTED' }
-                 else { 'FAIL/INCONCLUSIVE (check layout and keys)' }
-        Report 'Keyboard manual check' $state
-    }
-
-    Write-Host ''
-    Write-Host '--- 5. FAN ---' -ForegroundColor Yellow
-    $fans = @(Try-GetCim 'Win32_Fan')
-    if ($fans.Count) {
-        Report 'Fan firmware entries' ([string]$fans.Count + ' (presence is not proof of function)')
-    } else {
-        Report 'Fan sensor' 'Unavailable via standard Windows WMI on this machine'
-    }
-    Report 'Fan manual check' (Test-Manual 'When warm or under load, can you hear/feel airflow and no scraping?')
-
-    Write-Host ''
-    Write-Host '--- 6. BATTERY ---' -ForegroundColor Yellow
-    # Report ONE percentage only: battery health (full-charge capacity / design capacity).
-    # Current charge level and raw status codes are deliberately omitted.
-    $batteryHealth = $null
-
-    # First try battery capacity data provided directly by the notebook firmware.
-    try {
-        $designData = @(Try-GetCim 'BatteryStaticData' 'root/wmi')
-        $fullData = @(Try-GetCim 'BatteryFullChargedCapacity' 'root/wmi')
-        foreach ($battery in $designData) {
-            $match = @($fullData | Where-Object { $_.InstanceName -eq $battery.InstanceName } | Select-Object -First 1)
-            if ($match.Count -gt 0) {
-                $design = [double]$battery.DesignedCapacity
-                $full = [double]$match[0].FullChargedCapacity
-                if ($design -gt 0 -and $full -gt 0) {
-                    $batteryHealth = [math]::Round(($full / $design) * 100, 1)
-                    break
+        & powercfg.exe /batteryreport /xml /output $xmlFile 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $xmlFile)) {
+            $xmlText = Get-Content -LiteralPath $xmlFile -Raw -ErrorAction Stop
+            $designMatch = [regex]::Match($xmlText, '<(?:\w+:)?DesignCapacity>\s*(\d+)\s*</(?:\w+:)?DesignCapacity>')
+            $fullMatch = [regex]::Match($xmlText, '<(?:\w+:)?FullChargeCapacity>\s*(\d+)\s*</(?:\w+:)?FullChargeCapacity>')
+            if ($designMatch.Success -and $fullMatch.Success) {
+                $designCapacity = [double]$designMatch.Groups[1].Value
+                $fullCapacity = [double]$fullMatch.Groups[1].Value
+                if ($designCapacity -gt 0 -and $fullCapacity -gt 0) {
+                    $health = [math]::Round(100.0 * $fullCapacity / $designCapacity, 1)
                 }
             }
         }
-    } catch {}
-
-    # Fallback: parse a fresh Windows battery report if firmware data is unavailable.
-    if ($null -eq $batteryHealth) {
-        $batteryXml = Join-Path $env:TEMP 'WindowsTools-P2-Battery.xml'
-        try {
-            if (Test-Path -LiteralPath $batteryXml) { Remove-Item -LiteralPath $batteryXml -Force -ErrorAction Stop }
-            & powercfg.exe /batteryreport /xml /output $batteryXml 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $batteryXml)) {
-                $raw = Get-Content -LiteralPath $batteryXml -Raw -ErrorAction Stop
-                $designMatch = [regex]::Match($raw, '<(?:\w+:)?DesignCapacity>\s*(\d+)\s*</(?:\w+:)?DesignCapacity>')
-                $fullMatch = [regex]::Match($raw, '<(?:\w+:)?FullChargeCapacity>\s*(\d+)\s*</(?:\w+:)?FullChargeCapacity>')
-                if ($designMatch.Success -and $fullMatch.Success) {
-                    $design = [double]$designMatch.Groups[1].Value
-                    $full = [double]$fullMatch.Groups[1].Value
-                    if ($design -gt 0 -and $full -gt 0) {
-                        $batteryHealth = [math]::Round(($full / $design) * 100, 1)
-                    }
-                }
-            }
-        } catch {}
     }
-    if ($null -ne $batteryHealth) {
-        Report 'Battery health' ('{0:0.0}%' -f $batteryHealth)
-    } else {
-        Report 'Battery health' 'Unavailable (battery capacity data not provided)'
+    catch {
+        # Leave health unknown rather than displaying an incorrect percentage.
     }
+    finally {
+        Remove-Item -LiteralPath $xmlFile -Force -ErrorAction SilentlyContinue
+    }
+}
 
-    Write-Host '--- FINISH ---' -ForegroundColor Green
-    Report 'Test limitation' 'Device detection is not a full functional test. Fan RPM often unavailable.'
-}
-catch {
-    Report 'ERROR' $_.Exception.Message
-}
-finally {
-    try {
-        $script:Lines | Out-File -LiteralPath $reportPath -Encoding UTF8
-        Write-Host ('Report saved: ' + $reportPath) -ForegroundColor Cyan
-    } catch { Write-Warning ('Could not save report: ' + $_.Exception.Message) }
+if ($null -ne $health) {
+    Write-Host ('Battery health: {0:0.0}%' -f $health)
+} else {
+    Write-Host 'Battery health: Unavailable'
 }
