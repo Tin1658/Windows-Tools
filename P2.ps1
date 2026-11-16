@@ -155,40 +155,53 @@ try {
 
     Write-Host ''
     Write-Host '--- 6. BATTERY ---' -ForegroundColor Yellow
-    $batteries = @(Try-GetCim 'Win32_Battery')
-    if ($batteries.Count -gt 0) {
-        Report 'Battery detected' 'YES'
-        Report 'Battery level %' ([string]$batteries[0].EstimatedChargeRemaining)
-        Report 'Battery status code' ([string]$batteries[0].BatteryStatus)
-        $batteryHtml = Join-Path $desktop 'P2-Battery-Report.html'
-        try {
-            & powercfg.exe /batteryreport /output $batteryHtml | Out-Null
-            if (Test-Path -LiteralPath $batteryHtml) {
-                Report 'Battery report HTML' $batteryHtml
-            }
-        } catch { Report 'Battery report' ('unavailable: ' + $_.Exception.Message) }
+    # Report ONE percentage only: battery health (full-charge capacity / design capacity).
+    # Current charge level and raw status codes are deliberately omitted.
+    $batteryHealth = $null
 
+    # First try battery capacity data provided directly by the notebook firmware.
+    try {
+        $designData = @(Try-GetCim 'BatteryStaticData' 'root/wmi')
+        $fullData = @(Try-GetCim 'BatteryFullChargedCapacity' 'root/wmi')
+        foreach ($battery in $designData) {
+            $match = @($fullData | Where-Object { $_.InstanceName -eq $battery.InstanceName } | Select-Object -First 1)
+            if ($match.Count -gt 0) {
+                $design = [double]$battery.DesignedCapacity
+                $full = [double]$match[0].FullChargedCapacity
+                if ($design -gt 0 -and $full -gt 0) {
+                    $batteryHealth = [math]::Round(($full / $design) * 100, 1)
+                    break
+                }
+            }
+        }
+    } catch {}
+
+    # Fallback: parse a fresh Windows battery report if firmware data is unavailable.
+    if ($null -eq $batteryHealth) {
         $batteryXml = Join-Path $env:TEMP 'WindowsTools-P2-Battery.xml'
         try {
-            & powercfg.exe /batteryreport /xml /output $batteryXml | Out-Null
-            if (Test-Path -LiteralPath $batteryXml) {
-                $raw = Get-Content -LiteralPath $batteryXml -Raw
-                $designMatch = [regex]::Match($raw,'<DesignCapacity>(\d+)</DesignCapacity>')
-                $fullMatch = [regex]::Match($raw,'<FullChargeCapacity>(\d+)</FullChargeCapacity>')
+            if (Test-Path -LiteralPath $batteryXml) { Remove-Item -LiteralPath $batteryXml -Force -ErrorAction Stop }
+            & powercfg.exe /batteryreport /xml /output $batteryXml 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $batteryXml)) {
+                $raw = Get-Content -LiteralPath $batteryXml -Raw -ErrorAction Stop
+                $designMatch = [regex]::Match($raw, '<(?:\w+:)?DesignCapacity>\s*(\d+)\s*</(?:\w+:)?DesignCapacity>')
+                $fullMatch = [regex]::Match($raw, '<(?:\w+:)?FullChargeCapacity>\s*(\d+)\s*</(?:\w+:)?FullChargeCapacity>')
                 if ($designMatch.Success -and $fullMatch.Success) {
                     $design = [double]$designMatch.Groups[1].Value
                     $full = [double]$fullMatch.Groups[1].Value
-                    if ($design -gt 0) {
-                        Report 'Battery health % (capacity estimate)' ([string][math]::Round(($full / $design) * 100, 1))
+                    if ($design -gt 0 -and $full -gt 0) {
+                        $batteryHealth = [math]::Round(($full / $design) * 100, 1)
                     }
                 }
             }
-        } catch { Report 'Battery capacity estimate' 'Unavailable' }
+        } catch {}
+    }
+    if ($null -ne $batteryHealth) {
+        Report 'Battery health' ('{0:0.0}%' -f $batteryHealth)
     } else {
-        Report 'Battery detected' 'NO (or not exposed via WMI)'
+        Report 'Battery health' 'Unavailable (battery capacity data not provided)'
     }
 
-    Write-Host ''
     Write-Host '--- FINISH ---' -ForegroundColor Green
     Report 'Test limitation' 'Device detection is not a full functional test. Fan RPM often unavailable.'
 }
