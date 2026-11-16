@@ -92,18 +92,64 @@ function Set-ThailandProfile {
     Write-Host 'Thai Buddhist calendar (dd/MM/yyyy) and grave-accent key configured.'
     Write-Host 'Language shortcut and region settings may require sign-out/restart.'
 }
-function Set-StaticWallpaper {
-    $preferred = Join-Path $env:WINDIR 'Web\Wallpaper\Windows\img0.jpg'
-    $wallpaper = if (Test-Path -LiteralPath $preferred) { $preferred } else { $null }
-    if (-not $wallpaper) {
-        $image = Get-ChildItem (Join-Path $env:WINDIR 'Web\Wallpaper') -File -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -in @('.jpg','.jpeg','.bmp') } |
-            Select-Object -First 1
-        if ($image) { $wallpaper = $image.FullName }
+function Set-ThailandClock {
+    # Thailand uses UTC+07:00 with no daylight-saving change.
+    $desiredZone = 'SE Asia Standard Time'
+    $currentZone = Get-TimeZone
+    if ($currentZone.Id -ne $desiredZone) {
+        Set-TimeZone -Id $desiredZone -ErrorAction Stop
+        Write-Host ('Time zone changed to Thailand (UTC+07:00) from ' + $currentZone.Id)
+    } else {
+        Write-Host 'Time zone already Thailand (UTC+07:00).'
     }
-    if (-not $wallpaper) { throw 'No built-in Windows wallpaper image was found.' }
-    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers'
-    Set-ValueIfDifferent $key 'BackgroundType' 0 'DWord'
+
+    # Synchronize with the configured Windows time source: do not invent a clock value.
+    try {
+        $timeService = Get-Service -Name 'W32Time' -ErrorAction Stop
+        if ($timeService.Status -ne 'Running') {
+            Start-Service -Name 'W32Time' -ErrorAction Stop
+        }
+        $w32tm = Join-Path $env:WINDIR 'System32\w32tm.exe'
+        $syncOutput = & $w32tm /resync /rediscover 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw (($syncOutput | Out-String).Trim())
+        }
+        Write-Host 'Windows time synchronized using its configured time source.' -ForegroundColor Green
+    }
+    catch {
+        Write-Warning ('Time synchronization not verified: ' + $_.Exception.Message)
+        $script:Manual.Add('Check internet access and Settings > Time & language > Date & time > Sync now.')
+    }
+    $thaiCulture = [Globalization.CultureInfo]::GetCultureInfo('th-TH')
+    Write-Host ('Local Thailand time: ' + (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', $thaiCulture))
+}
+
+function Set-Windows11LightBloomTheme {
+    # Match the user's Windows 11 light/Bloom preview, not a random wallpaper.
+    $themeKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    Set-ValueIfDifferent $themeKey 'AppsUseLightTheme' 1 'DWord'
+    Set-ValueIfDifferent $themeKey 'SystemUsesLightTheme' 1 'DWord'
+    Set-ValueIfDifferent $themeKey 'EnableTransparency' 1 'DWord'
+    Set-ValueIfDifferent $themeKey 'ColorPrevalence' 0 'DWord'
+
+    $wallpaper = Join-Path $env:WINDIR 'Web\Wallpaper\Windows\img0.jpg'
+    if (-not (Test-Path -LiteralPath $wallpaper -PathType Leaf)) {
+        $folder = Join-Path $env:WINDIR 'Web\4K\Wallpaper\Windows'
+        $fallback = @(Get-ChildItem -LiteralPath $folder -Filter 'img0_*' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in @('.jpg', '.jpeg', '.png') } |
+            Sort-Object Length -Descending | Select-Object -First 1)
+        if ($fallback.Count) { $wallpaper = $fallback[0].FullName }
+        else {
+            throw 'Windows 11 light Bloom wallpaper was not found. Not substituting another picture.'
+        }
+    }
+
+    $desktopKey = 'HKCU:\Control Panel\Desktop'
+    Set-ValueIfDifferent $desktopKey 'WallpaperStyle' '10'
+    Set-ValueIfDifferent $desktopKey 'TileWallpaper' '0'
+    $wallpaperKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers'
+    Set-ValueIfDifferent $wallpaperKey 'BackgroundType' 0 'DWord'
+
     if (-not ('P1Desktop' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -114,12 +160,13 @@ public static class P1Desktop {
 }
 '@
     }
-    # SPI_SETDESKWALLPAPER=20; update profile & broadcast change=3.
     if (-not [P1Desktop]::SystemParametersInfo(20,0,$wallpaper,3)) {
-        throw 'Windows could not apply the static wallpaper.'
+        throw 'Windows could not apply the light Bloom desktop wallpaper.'
     }
-    Write-Host ('Single-picture wallpaper: ' + $wallpaper)
+    Write-Host ('Windows 11 light mode enabled. Bloom wallpaper: ' + $wallpaper) -ForegroundColor Green
+    Write-Host 'Some taskbar/Settings theme changes may require signing out and back in.'
 }
+
 function Add-OfficeShortcuts {
     $prefixes = @($env:ProgramFiles, [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -267,11 +314,12 @@ function Invoke-WuaWithProgress($Worker,[string]$Stage,$SelectedUpdates) {
     $job = $null
     $cbProgress = $null
     $cbCompleted = $null
+    $abortRequested = $false
     $activity = 'Windows Update and drivers - ' + $Stage
     try {
+        $cbProgress = New-WuaCallback
+        $cbCompleted = New-WuaCallback
         try {
-            $cbProgress = New-WuaCallback
-            $cbCompleted = New-WuaCallback
             if ($Stage -eq 'Download') {
                 $job = $Worker.BeginDownload($cbProgress,$cbCompleted,$null)
             } else {
@@ -279,78 +327,128 @@ function Invoke-WuaWithProgress($Worker,[string]$Stage,$SelectedUpdates) {
             }
         }
         catch {
-            Write-Warning ('Could not start asynchronous ' + $Stage + ': ' + $_.Exception.Message)
-            Write-Warning 'Using standard Windows Update method. Live MB/ETA unavailable in this mode.'
-            if ($Stage -eq 'Download') { return $Worker.Download() }
-            return $Worker.Install()
+            # A synchronous fallback could block indefinitely with no progress or cancel option.
+            throw ('Could not start asynchronous ' + $Stage + ': ' + $_.Exception.Message)
         }
 
         $started = Get-Date
+        $lastMoved = $started
+        $fullSince = $null
         $lastPrinted = [datetime]::MinValue
         $lastPercent = -1
-        Write-Host ($Stage + ' started for ' + $SelectedUpdates.Count + ' updates. Checking progress every 3 seconds.')
+        $lastBytes = -1.0
+        $lastIndex = -1
+        $lastWarning = [datetime]::MinValue
+        $lastReportedPercent = -1
+        Write-Host ($Stage + ' started for ' + $SelectedUpdates.Count + ' updates. Checking every 3 seconds.')
         while (-not $job.IsCompleted) {
-            $status = 'Waiting for Windows Update progress... ETA unavailable'
+            $status = 'Waiting for Windows Update progress...'
             $percent = 0
             $etaSeconds = -1.0
+            $downloaded = -1.0
+            $index = -1
+            $now = Get-Date
             try {
-                # GetProgress returns a snapshot; it must be fetched again each poll.
                 $p = $job.GetProgress()
                 $percent = [Math]::Max(0,[Math]::Min(100,[int]$p.PercentComplete))
-                $elapsed = ((Get-Date) - $started).TotalSeconds
+                $elapsed = ($now - $started).TotalSeconds
                 $index = [Math]::Max(0,[Math]::Min(($SelectedUpdates.Count - 1),[int]$p.CurrentUpdateIndex))
                 $itemLabel = ('[{0}/{1}]' -f ($index + 1),$SelectedUpdates.Count)
                 if ($Stage -eq 'Download') {
-                    $downloaded = 0.0
                     $total = 0.0
-                    $hasDownloaded = [double]::TryParse([string]$p.TotalBytesDownloaded,
+                    $bytesReported = [double]::TryParse([string]$p.TotalBytesDownloaded,
                         [System.Globalization.NumberStyles]::Float,
                         [System.Globalization.CultureInfo]::InvariantCulture,[ref]$downloaded)
-                    $hasTotal = [double]::TryParse([string]$p.TotalBytesToDownload,
+                    $totalReported = [double]::TryParse([string]$p.TotalBytesToDownload,
                         [System.Globalization.NumberStyles]::Float,
                         [System.Globalization.CultureInfo]::InvariantCulture,[ref]$total)
-                    if ($hasDownloaded -and $hasTotal -and $total -gt 0) {
+                    if ($bytesReported -and $totalReported -and $total -gt 0 -and $downloaded -ge 0 -and $downloaded -le $total) {
                         $status = ('{0} {1} / {2} ({3}%)' -f $itemLabel,(Format-WuaBytes $downloaded),(Format-WuaBytes $total),$percent)
                         if ($elapsed -ge 10 -and $downloaded -gt 0 -and $total -gt $downloaded) {
                             $etaSeconds = ($total - $downloaded) * $elapsed / $downloaded
                         }
                     } else {
-                        $status = ('{0} {1}% (download size not reported)' -f $itemLabel,$percent)
+                        $status = ('{0} {1}% (byte totals unavailable/inconsistent)' -f $itemLabel,$percent)
                     }
                 } else {
-                    $status = ('{0} {1}% installed (current: {2}%)' -f $itemLabel,$percent,[int]$p.CurrentUpdatePercentComplete)
+                    $status = ('{0} {1}% installed (current update: {2}%)' -f $itemLabel,$percent,[int]$p.CurrentUpdatePercentComplete)
+                }
+
+                if ($percent -gt $lastPercent -or $downloaded -gt $lastBytes -or $index -ne $lastIndex) {
+                    $lastMoved = $now
+                    $lastPercent = $percent
+                    $lastBytes = $downloaded
+                    $lastIndex = $index
                 }
                 if ($etaSeconds -lt 0 -and $elapsed -ge 20 -and $percent -ge 5 -and $percent -lt 100) {
                     $etaSeconds = $elapsed * (100 - $percent) / $percent
                 }
             }
             catch {
-                $status = 'Windows Update is working; progress snapshot unavailable for now'
+                $status = 'Progress snapshot unavailable. Checking Windows Update job status.'
             }
+
+            if ($percent -ge 100) {
+                # 100% means bytes/progress were reported; completion still requires IsCompleted.
+                if ($null -eq $fullSince) { $fullSince = $now }
+                $etaSeconds = -1.0
+                $status += ' | 100% reported, waiting for Windows Update to finalize'
+            } else { $fullSince = $null }
+
+            if ($Stage -eq 'Download') {
+                $timeoutReason = ''
+                if ($null -ne $fullSince -and ($now - $fullSince).TotalSeconds -ge 60) {
+                    $timeoutReason = 'Download stayed at 100% for 60 seconds without completion.'
+                } elseif (($now - $lastMoved).TotalSeconds -ge 180) {
+                    $timeoutReason = 'Download progress has not advanced for 3 minutes.'
+                }
+                if ($timeoutReason) {
+                    Write-Warning ($timeoutReason + ' Requesting safe abort; no updates will be installed by this pass.')
+                    $abortRequested = $true
+                    try { $job.RequestAbort() }
+                    catch { Write-Warning ('Abort request failed: ' + $_.Exception.Message) }
+                    for ($wait = 0; $wait -lt 10; $wait++) {
+                        if ($job.IsCompleted) { break }
+                        Start-Sleep -Seconds 1
+                    }
+                    throw ($timeoutReason + ' Use Settings > Windows Update to retry or continue later.')
+                }
+            } elseif ($null -ne $fullSince -and ($now - $fullSince).TotalSeconds -ge 300 -and ($now - $lastWarning).TotalSeconds -ge 60) {
+                # Never automatically abort a possibly in-progress OS update installation.
+                Write-Warning 'Install reports 100% but is still finalizing. Do not force shutdown while installing.'
+                $lastWarning = $now
+            }
+
             $etaText = Format-WuaEta $etaSeconds
             Write-Progress -Activity $activity -Status ($status + ' | ETA: ' + $etaText) -PercentComplete $percent -SecondsRemaining ([int]$etaSeconds)
-            $now = Get-Date
-            if (($now - $lastPrinted).TotalSeconds -ge 15 -or $percent -ge ($lastPercent + 10)) {
+            if (($now - $lastPrinted).TotalSeconds -ge 20 -or ($percent -ge ($lastReportedPercent + 10))) {
                 Write-Host ('[{0}] {1} | ETA: {2}' -f $Stage.ToUpperInvariant(),$status,$etaText)
                 $lastPrinted = $now
-                $lastPercent = $percent
+                $lastReportedPercent = $percent
             }
             Start-Sleep -Seconds 3
         }
+
         if ($Stage -eq 'Download') { $result = $Worker.EndDownload($job) }
         else { $result = $Worker.EndInstall($job) }
-        Write-Host ('{0} finished. WUA result code: {1}.' -f $Stage,$result.ResultCode) -ForegroundColor Green
+        Write-Host ('{0} finished. Windows Update result code: {1}.' -f $Stage,$result.ResultCode) -ForegroundColor Green
         return $result
     }
     finally {
         Write-Progress -Activity $activity -Completed
         if ($null -ne $job) {
             try {
-                if (-not $job.IsCompleted) { $job.RequestAbort() }
-                $job.CleanUp()  # Releases callbacks after operation completes.
-            } catch { Write-Warning ('Could not clean up Windows Update job: ' + $_.Exception.Message) }
+                if ($job.IsCompleted) {
+                    $job.CleanUp() # Safe only when completed; otherwise this call waits indefinitely.
+                } elseif ($abortRequested) {
+                    Write-Warning 'Windows Update abort still pending. Skipping blocking cleanup; close PowerShell after P1 finishes.'
+                } else {
+                    $job.RequestAbort()
+                    Write-Warning 'Requested Windows Update abort; no blocking cleanup while job remains active.'
+                }
+            }
+            catch { Write-Warning ('Could not clean up Windows Update job: ' + $_.Exception.Message) }
         }
-        # Keep callback objects alive until job cleanup has completed.
         $cbProgress = $null
         $cbCompleted = $null
     }
@@ -488,8 +586,9 @@ try {
     Step 'Check Windows profile name (User)' { Check-ExpectedWindowsProfile }
     if (-not $SkipPrograms) { Step 'Existing USB programs and Office (p.ps1)' { Run-ExistingPrograms } }
     Step 'Thai calendar and grave-accent switch' { Set-ThailandProfile }
+    Step 'Thailand time zone and clock synchronization' { Set-ThailandClock }
     Step 'Windows desktop icons' { Set-DesktopIcons }
-    Step 'Single static wallpaper' { Set-StaticWallpaper }
+    Step 'Windows 11 light theme and Bloom wallpaper' { Set-Windows11LightBloomTheme }
     Step 'Word / Excel / PowerPoint desktop shortcuts' { Add-OfficeShortcuts }
     if (-not $SkipUpdates) { Step 'Windows updates and offered drivers; no AutoReboot' { Install-RecommendedUpdatesWithoutRestart } }
     Step 'Install and verify MyASUS' { Install-MyASUSIfAppropriate }
