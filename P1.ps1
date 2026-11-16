@@ -14,6 +14,8 @@ P1 never calls Windows-Update-All.ps1/u.ps1 because those request AutoReboot.
 # Defaults for optional stages.
 $SkipPrograms = $false
 $SkipUpdates = $false
+# Set WT_QUICKFIX=1 to apply only Thai date/time and Windows 11 light/Bloom theme.
+$QuickFix = ($env:WT_QUICKFIX -eq '1')
 
 $ErrorActionPreference = 'Stop'
 $script:Problems = New-Object 'System.Collections.Generic.List[string]'
@@ -582,6 +584,17 @@ try {
     Write-Host '============= WINDOWS-TOOLS P1 =============' -ForegroundColor Green
     Write-Host 'Run under the Windows account whose desktop and settings you want to change.'
     Write-Host 'P1 does not schedule a restart. Restart Windows manually when ready.'
+
+    if ($QuickFix) {
+        Write-Host 'QUICK FIX: Thai clock/date and Windows 11 light Bloom theme only.' -ForegroundColor Cyan
+        Step 'Thai calendar and grave-accent switch' { Set-ThailandProfile }
+        Step 'Thailand time zone and clock synchronization' { Set-ThailandClock }
+        Step 'Windows 11 light theme and Bloom wallpaper' { Set-Windows11LightBloomTheme }
+        foreach ($problem in $script:Problems) { Write-Warning ('FAILED: ' + $problem) }
+        if ($script:Problems.Count -eq 0) { Write-Host 'Quick fix complete. No updates, downloads, or application installs were started.' -ForegroundColor Green }
+        Write-Host 'Sign out and back in if the theme has not fully changed. No restart command was issued.'
+        return
+    }
 
     Step 'Check Windows profile name (User)' { Check-ExpectedWindowsProfile }
     if (-not $SkipPrograms) { Step 'Existing USB programs and Office (p.ps1)' { Run-ExistingPrograms } }
